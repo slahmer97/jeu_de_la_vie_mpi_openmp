@@ -3,4 +3,4 @@ project(projet_final_mpi C)
 
 set(CMAKE_C_STANDARD 99)
 
-add_executable(projet_final_mpi main.c header.h)
+add_executable(projet_final_mpi main.c )

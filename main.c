@@ -5,6 +5,10 @@
 #include <stdlib.h>
 #include <time.h>
 #include <sys/time.h>
+#include <openmpi-x86_64/mpi.h>
+#include <string.h>
+#include <unistd.h>
+#include <assert.h>
 
 // hauteur et largeur de la matrice
 #define HM 1200
@@ -22,76 +26,181 @@
 typedef char Tab[HM][LM];
 
 //===============================ADDED====================================
-#define LOCAL_ROWS 2
+#define LOCAL_ROWS 200
 
 typedef struct{
-    char upper[1][LM];
+    char previous[LM];
     char local[LOCAL_ROWS][LM];
-    char lower[1][LM];
+    char next[LM];
 }my_struct;
-
-
-//===============================FINADDED=================================
-// initialisation du tableau de cellules
+#define MY_STRUCT_SIZE sizeof(char)*(LM*2+LM*LOCAL_ROWS)
 void init(Tab);
-
-// calcule une nouveau tableau de cellules à partir de l'ancien
-// - paramètres : ancien, nouveau
 void calcnouv(Tab, Tab);
 
-// variables globales : pas de débordement de pile
-Tab t1, t2;
+Tab t2,t1;
 Tab tsauvegarde[1+ITER/SAUV];
-
-int main()
+int rank;
+my_struct data;
+int next_save = 0;
+void init_data_distribution(int rank,int size);
+const char* get_rank_start_ptr(Tab,int,int);
+const char* get_next_rank_start_ptr(Tab,int,int);
+const char* get_previous_rank_start_ptr(Tab,int,int);
+void struct_init_cpy(my_struct* dest,const char*next,const char*previous,const char*local);
+void save_my_struct(const char*,my_struct*);
+void print_all_matix(const char*filename,Tab a);
+void forward_data_to_master();
+void next_evolution();
+void communicate_data_with_neighbors();
+int main(int argc,char**argv)
 {
-    struct timeval tv_init, tv_beg, tv_end, tv_save;
+    MPI_Init(&argc,&argv);
+    int size;
+    MPI_Comm_size(MPI_COMM_WORLD,&size);
+    MPI_Comm_rank(MPI_COMM_WORLD,&rank);
+    if(rank == 0)
+        printf("\n size = %d \n",size);
 
-    gettimeofday( &tv_init, NULL);
+    int next_neighbor = 0;
+    int previous_neighbor = 0;
+
     init(t1);
-
-    gettimeofday( &tv_beg, NULL);
-    for(int i=0 ; i<ITER ; i++)
-    {
-        if( i%2 == 0)
-            calcnouv(t1, t2);
-        else
-            calcnouv(t2, t1);
-
-        if(i%SAUV == 0)
-        {
-            printf("sauvegarde (%d)\n", i);
-            // copie t1 dans tsauvegarde[i/SAUV]
-            for(int x=0 ; x<HM ; x++)
-                for(int y=0 ; y<LM ; y++)
-                    tsauvegarde[i/SAUV][x][y] = t1[x][y];
-        }
-    }
-    gettimeofday( &tv_end, NULL);
-
-    FILE *f = fopen("jdlv.out", "w");
-    for(int i=0 ; i<ITER ; i+=SAUV)
-    {
-        fprintf(f, "------------------ sauvegarde %d ------------------\n", i);
-        for(int x=0 ; x<HM ; x++)
-        {
-            for(int y=0 ; y<LM ; y++)
-                fprintf(f, tsauvegarde[i/SAUV][x][y]?"*":" ");
-            fprintf(f, "\n");
-        }
-    }
-    fclose(f);
-    gettimeofday( &tv_save, NULL);
-
-    printf("init : %lf s,", DIFFTEMPS(tv_init, tv_beg));
-    printf(" calcul : %lf s,", DIFFTEMPS(tv_beg, tv_end));
-    printf(" sauvegarde : %lf s\n", DIFFTEMPS(tv_end, tv_save));
-
+    print_all_matix("my_test/all",t1);
+    init_data_distribution(rank,size);
+    MPI_Finalize();
     return( 0 );
 }
+void init_data_distribution(int rank,int size){
+    MPI_Datatype mpi_my_struct_type;
+    MPI_Type_contiguous(MY_STRUCT_SIZE,MPI_CHAR,&mpi_my_struct_type);
+    MPI_Type_commit(&mpi_my_struct_type);
 
-void init(Tab t)
+    if(rank == 0){
+        const char* next = get_next_rank_start_ptr(t1,rank,size);
+        const char* previous = get_previous_rank_start_ptr(t1,rank,size);
+        const char* local = get_rank_start_ptr(t1,rank,size);
+        struct_init_cpy(&data, next, previous,local);
+        save_my_struct("my_test/rank0",&data);
+        my_struct tmp;
+        for (int machine = 1; machine < size; ++machine) {
+            //parallel
+            next = get_next_rank_start_ptr(t1,machine,size);
+            previous = get_previous_rank_start_ptr(t1,machine,size);
+            local = get_rank_start_ptr(t1,machine,size);
+            struct_init_cpy(&tmp, next, previous,local);
+            char file_name[30];
+           // sprintf(file_name,"file%d",machine);
+           // save_my_struct(file_name,&tmp);
+            MPI_Send(&tmp,1,mpi_my_struct_type,machine,0,MPI_COMM_WORLD);
+        }
+
+    }
+    else{
+        char file_name[20];
+        sprintf(file_name,"my_test/recv_%d",rank);
+        MPI_Recv(&data,1,mpi_my_struct_type,0,0,MPI_COMM_WORLD,MPI_STATUS_IGNORE);
+        save_my_struct(file_name,&data);
+    }
+
+}
+void struct_init_cpy(my_struct* dest,const char next[],const char previous[], const char *local){
+
+
+    for (int i = 0; i <LM ; ++i) {
+        dest->next[i] = next[i];
+        dest->previous[i] = previous[i];
+    }
+    for (int j = 0; j < LOCAL_ROWS ; ++j)
+        for (int i = 0; i < LM; ++i)
+            dest->local[j][i] = local[j*LM+i];
+}
+const char* get_rank_start_ptr(Tab t,int rank_,int _size){
+    if(rank_ < _size)
+     return &t[rank_*LOCAL_ROWS][0];
+    else
+        return (const char *)0;
+}
+const char* get_next_rank_start_ptr(Tab t,int rank_,int _size){
+    const char* ret = 0;
+    if(rank_ == _size -1) ret = &t[0][0];
+    else if(rank_ >= 0 && rank_ <_size-1){
+        ret =&t[(rank_*LOCAL_ROWS) + LOCAL_ROWS][0] ;
+    }
+    return ret;
+}
+const char* get_previous_rank_start_ptr(Tab t,int rank_,int _size){
+    const char* ret = 0;
+    if(rank_ == 0) ret = &t[HM-1][0];
+    else if(rank_ > 0 && rank_ <= _size-1){
+        ret =&t[(rank_*LOCAL_ROWS)-1][0] ;
+    }
+    return ret;
+}
+
+int nbvois(my_struct* t, int i, int j)
 {
+    int n=0;
+
+    if( i>0 )
+    {  /* i-1 */
+        if( j>0 )
+            if( t->local[i-1][j-1] )
+                n++;
+        if( t->local[i-1][j] )
+            n++;
+        if( j<LM-1 )
+            if( t->local[i-1][j+1] )
+                n++;
+    }
+    if( j>0 )
+        if( t->local[i][j-1] )
+            n++;
+    if( j<LM-1 )
+        if( t->local[i][j+1] )
+            n++;
+    if( i<HM-1 )
+    {  /* i+1 */
+        if( j>0 )
+            if( t->local[i+1][j-1] )
+                n++;
+        if( t->local[i+1][j] )
+            n++;
+        if( j<LM-1 )
+            if( t->local[i+1][j+1] )
+                n++;
+    }
+    return( n );
+}
+
+void test1(){
+    /*
+    assert(get_rank_start_ptr(t1,0,size)== &t1[0][0]);
+    assert(get_rank_start_ptr(t1,1,size)== &t1[LOCAL_ROWS*1][0]);
+    assert(get_rank_start_ptr(t1,2,size)== &t1[LOCAL_ROWS*2][0]);
+    assert(get_rank_start_ptr(t1,3,size)== &t1[LOCAL_ROWS*3][0]);
+    assert(get_rank_start_ptr(t1,4,size)== &t1[LOCAL_ROWS*4][0]);
+
+     ========================
+
+
+     assert(get_lower_rank_start_ptr(t1,0,size) == &t1[HM-1][0]);
+    assert(get_lower_rank_start_ptr(t1,1,size) == &t1[LOCAL_ROWS-1][0]);
+    assert(get_lower_rank_start_ptr(t1,2,size) == &t1[LOCAL_ROWS*2 -1][0]);
+    assert(get_lower_rank_start_ptr(t1,3,size) == &t1[LOCAL_ROWS*3 -1][0]);
+    assert(get_lower_rank_start_ptr(t1,4,size) == &t1[LOCAL_ROWS*4 -1][0]);
+
+
+     =======================
+      assert(get_upper_rank_start_ptr(t1,0,size) == &t1[LOCAL_ROWS][0]);
+    assert(get_upper_rank_start_ptr(t1,1,size) == &t1[LOCAL_ROWS*2][0]);
+    assert(get_upper_rank_start_ptr(t1,2,size) == &t1[LOCAL_ROWS*3][0]);
+    assert(get_upper_rank_start_ptr(t1,5,size) == &t1[LOCAL_ROWS*6][0]);
+    assert(get_upper_rank_start_ptr(t1,8,size) == &t1[LOCAL_ROWS*9][0]);
+    assert(get_upper_rank_start_ptr(t1,9,size) == &t1[LOCAL_ROWS*10][0]);
+    assert(get_upper_rank_start_ptr(t1,size-1,size) == &t1[0][0]);
+     */
+}
+void init(Tab t){
     srand(time(0));
     for(int i=0 ; i<HM ; i++)
         for(int j=0 ; j<LM ; j++ )
@@ -114,55 +223,82 @@ void init(Tab t)
     t[56][50] = 1;
     t[56][51] = 1;
     t[56][52] = 1;
+
+
+    t[201][10] = 1;
+    t[201][11] = 1;
+    t[201][12] = 1;
+    t[201][12] = 1;
+
+    t[400][0] = 1;
+    t[400][10] = 1;
+
+    t[401][0] = 1;
+    t[401][1] = 1;
+    t[401][2] = 1;
+
+
+
+    t[402][0] = 1;
+    t[402][1] = 1;
+    t[402][2] = 1;
+
+    t[420][0] = 1;
+    t[420][2] = 1;
+    t[420][20] = 1;
+
+
 }
 
-int nbvois(Tab t, int i, int j)
-{
-    int n=0;
-    if( i>0 )
-    {  /* i-1 */
-        if( j>0 )
-            if( t[i-1][j-1] )
-                n++;
-        if( t[i-1][j] )
-            n++;
-        if( j<LM-1 )
-            if( t[i-1][j+1] )
-                n++;
+void save_my_struct(const char* filename,my_struct* my_struct1){
+
+    printf("%s , %8x\n",filename,my_struct1);
+
+    FILE *f = fopen(filename, "w");
+
+
+    fprintf(f, "------------------ LOCAL %d ------------------\n", rank);
+    for(int x=0 ; x<HM ; x++)
+    {
+        fprintf(f,"[%d]",x);
+        for(int y=0 ; y<LM ; y++)
+            fprintf(f,"%c",my_struct1->local[x][y]?'*':'0');
+        fprintf(f,"%c",'\n');
     }
-    if( j>0 )
-        if( t[i][j-1] )
-            n++;
-    if( j<LM-1 )
-        if( t[i][j+1] )
-            n++;
-    if( i<HM-1 )
-    {  /* i+1 */
-        if( j>0 )
-            if( t[i+1][j-1] )
-                n++;
-        if( t[i+1][j] )
-            n++;
-        if( j<LM-1 )
-            if( t[i+1][j+1] )
-                n++;
+
+    fclose(f);
+}
+void print_all_matix(const char*filename,Tab a){
+    FILE *f = fopen(filename, "w");
+    fprintf(f, "------------------GLOBAL_Matrix------------------\n");
+
+    for(int x=0 ; x<HM ; x++)
+    {
+        for(int y=0 ; y<LM ; y++)
+            fprintf(f,"%c",a[x][y]?'*':'0');
+        fprintf(f,"%c",'\n');
     }
-    return( n );
+
+    fclose(f);
+
 }
 
-void calcnouv(Tab t, Tab n)
-{
-#pragma omp parallel for
-    for(int i=0 ; i<HM ; i++)
-        for(int j=0 ; j<LM ; j++)
-        {
-            int v = nbvois(t, i, j);
-            if(v==3)
-                n[i][j] = 1;
-            else if(v==2)
-                n[i][j] = t[i][j];
-            else
-                n[i][j] = 0;
-        }
+void forward_data_to_master(){
+    Tab *recvbuff = NULL;
+    if(rank == 0){
+        recvbuff = tsauvegarde;
+    }
+
+    MPI_Gather(data.local,LOCAL_ROWS*LM,MPI_CHAR,recvbuff,LOCAL_ROWS*LM,MPI_CHAR,0,MPI_COMM_WORLD);
+
+    if(rank == 0)
+        next_save++;
+}
+
+void next_evolution(){
+
+}
+
+void communicate_data_with_neighbors(){
 
 }
