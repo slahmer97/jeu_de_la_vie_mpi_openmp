@@ -29,11 +29,9 @@ typedef char Tab[HM][LM];
 #define LOCAL_ROWS 200
 
 typedef struct{
-    char previous[LM];
     char local[LOCAL_ROWS][LM];
-    char next[LM];
 }my_struct;
-#define MY_STRUCT_SIZE sizeof(char)*(LM*2+LM*LOCAL_ROWS)
+#define MY_STRUCT_SIZE sizeof(char)*(LM*LOCAL_ROWS)
 void init(Tab);
 void calcnouv(Tab, Tab);
 
@@ -106,10 +104,6 @@ void init_data_distribution(int rank,int size){
 void struct_init_cpy(my_struct* dest,const char next[],const char previous[], const char *local){
 
 
-    for (int i = 0; i <LM ; ++i) {
-        dest->next[i] = next[i];
-        dest->previous[i] = previous[i];
-    }
     for (int j = 0; j < LOCAL_ROWS ; ++j)
         for (int i = 0; i < LM; ++i)
             dest->local[j][i] = local[j*LM+i];
@@ -171,7 +165,6 @@ int nbvois(my_struct* t, int i, int j)
     }
     return( n );
 }
-
 void test1(){
     /*
     assert(get_rank_start_ptr(t1,0,size)== &t1[0][0]);
@@ -248,11 +241,20 @@ void init(Tab t){
     t[420][20] = 1;
 
 
+
+    t[600][0] = 1;
+    t[600][2] = 1;
+    t[600][4] = 1;
+
+    t[600][5] = 1;
+    t[600][10] = 1;
+
+
 }
 
 void save_my_struct(const char* filename,my_struct* my_struct1){
 
-    printf("%s , %8x\n",filename,my_struct1);
+   // printf("%s , %8x\n",filename,my_struct1);
 
     FILE *f = fopen(filename, "w");
 
@@ -295,10 +297,3 @@ void forward_data_to_master(){
         next_save++;
 }
 
-void next_evolution(){
-
-}
-
-void communicate_data_with_neighbors(){
-
-}
